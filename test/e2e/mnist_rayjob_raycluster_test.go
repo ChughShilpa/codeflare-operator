@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strings"
 	"testing"
 
 	. "github.com/onsi/gomega"
@@ -119,6 +120,10 @@ func TestMnistRayJobRayClusterAppWrapperCpu(t *testing.T) {
 
 func TestMnistRayJobRayClusterAppWrapperCudaGpu(t *testing.T) {
 	runMnistRayJobRayClusterAppWrapper(t, "gpu", 1, "nvidia.com/gpu", GetRayImage())
+}
+
+func TestMnistRayJobRayClusterAppWrapperROCmGpu(t *testing.T) {
+	runMnistRayJobRayClusterAppWrapper(t, "gpu", 1, "amd.com/gpu", GetRayROCmImage())
 }
 
 // Same as TestMNISTRayJobRayCluster, except the RayCluster is wrapped in an AppWrapper
@@ -398,32 +403,21 @@ func constructRayCluster(_ Test, namespace *corev1.Namespace, localQueueName str
 }
 
 func constructRayJob(_ Test, namespace *corev1.Namespace, rayCluster *rayv1.RayCluster, accelerator string, numberOfGpus int, gpuResourceName string, rayImage string) *rayv1.RayJob {
-	fmt.Printf("Inside Ray Job function .........")
-	// Define the common runtime environment YAML
-	runtimeEnvYAML := `
-  pip:
-    - pytorch_lightning==2.4.0
-    - torchmetrics==1.6.0
-    - torchvision==0.19.1
-  env_vars:
-    MNIST_DATASET_URL: "` + GetMnistDatasetURL() + `"
-    PIP_INDEX_URL: "` + GetPipIndexURL() + `"
-    PIP_TRUSTED_HOST: "` + GetPipTrustedHost() + `"
-    ACCELERATOR: "` + accelerator + `"
-`
-
-	// Modify the runtime environment for  AMD GPUs
-	if gpuResourceName == "amd.com/gpu" {
-		runtimeEnvYAML += `
-  pip:
-    - --extra-index-url https://download.pytorch.org/whl/rocm6.1
-    - torch==2.4.1+rocm6.1
-`
+	pipPackages := []string{
+		"pytorch_lightning==2.4.0",
+		"torchmetrics==1.6.0",
+		"torchvision==0.19.1",
 	}
 
-	fmt.Println("Yaml after append :")
-	fmt.Println(runtimeEnvYAML)
-	fmt.Printf("Before return .........")
+	// Append AMD-specific packages
+	if gpuResourceName == "amd.com/gpu" {
+		pipPackages = append(pipPackages,
+			"--extra-index-url https://download.pytorch.org/whl/rocm6.1",
+			"torch==2.4.1+rocm6.1",
+		)
+	}
+
+	// Construct RayJob with the final pip list
 	return &rayv1.RayJob{
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: rayv1.GroupVersion.String(),
@@ -434,8 +428,16 @@ func constructRayJob(_ Test, namespace *corev1.Namespace, rayCluster *rayv1.RayC
 			Namespace: namespace.Name,
 		},
 		Spec: rayv1.RayJobSpec{
-			Entrypoint:     "python /home/ray/jobs/mnist.py",
-			RuntimeEnvYAML: runtimeEnvYAML,
+			Entrypoint: "python /home/ray/jobs/mnist.py",
+			RuntimeEnvYAML: fmt.Sprintf(`
+pip:
+  - %s
+env_vars:
+  MNIST_DATASET_URL: "%s"
+  PIP_INDEX_URL: "%s"
+  PIP_TRUSTED_HOST: "%s"
+  ACCELERATOR: "%s"
+`, strings.Join(pipPackages, "\n  - "), GetMnistDatasetURL(), GetPipIndexURL(), GetPipTrustedHost(), accelerator),
 			ClusterSelector: map[string]string{
 				RayJobDefaultClusterSelectorKey: rayCluster.Name,
 			},
