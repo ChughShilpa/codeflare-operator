@@ -59,13 +59,13 @@ func runMnistRayJobRayCluster(t *testing.T, accelerator string, numberOfGpus int
 
 	// Create Kueue resources
 	resourceFlavor := CreateKueueResourceFlavor(test, v1beta1.ResourceFlavorSpec{})
-	// defer func() {
-	// 	_ = test.Client().Kueue().KueueV1beta1().ResourceFlavors().Delete(test.Ctx(), resourceFlavor.Name, metav1.DeleteOptions{})
-	// }()
+	defer func() {
+		_ = test.Client().Kueue().KueueV1beta1().ResourceFlavors().Delete(test.Ctx(), resourceFlavor.Name, metav1.DeleteOptions{})
+	}()
 	clusterQueue := createClusterQueue(test, resourceFlavor, numberOfGpus, gpuResourceName)
-	// defer func() {
-	// 	_ = test.Client().Kueue().KueueV1beta1().ClusterQueues().Delete(test.Ctx(), clusterQueue.Name, metav1.DeleteOptions{})
-	// }()
+	defer func() {
+		_ = test.Client().Kueue().KueueV1beta1().ClusterQueues().Delete(test.Ctx(), clusterQueue.Name, metav1.DeleteOptions{})
+	}()
 	localQueue := CreateKueueLocalQueue(test, namespace.Name, clusterQueue.Name, AsDefaultQueue)
 
 	// Create MNIST training script
@@ -85,7 +85,7 @@ func runMnistRayJobRayCluster(t *testing.T, accelerator string, numberOfGpus int
 		Should(WithTransform(RayClusterState, Equal(rayv1.Ready)))
 
 	// Create RayJob
-	rayJob := constructRayJob(test, namespace, rayCluster, accelerator, numberOfGpus, rayImage)
+	rayJob := constructRayJob(test, namespace, rayCluster, accelerator, numberOfGpus, gpuResourceName, rayImage)
 	rayJob, err = test.Client().Ray().RayV1().RayJobs(namespace.Name).Create(test.Ctx(), rayJob, metav1.CreateOptions{})
 	test.Expect(err).NotTo(HaveOccurred())
 	test.T().Logf("Created RayJob %s/%s successfully", rayJob.Namespace, rayJob.Name)
@@ -187,7 +187,7 @@ func runMnistRayJobRayClusterAppWrapper(t *testing.T, accelerator string, number
 		Should(WithTransform(RayClusterState, Equal(rayv1.Ready)))
 
 	// Create RayJob
-	rayJob := constructRayJob(test, namespace, rayCluster, accelerator, numberOfGpus, rayImage)
+	rayJob := constructRayJob(test, namespace, rayCluster, accelerator, numberOfGpus, gpuResourceName, rayImage)
 	rayJob, err = test.Client().Ray().RayV1().RayJobs(namespace.Name).Create(test.Ctx(), rayJob, metav1.CreateOptions{})
 	test.Expect(err).NotTo(HaveOccurred())
 	test.T().Logf("Created RayJob %s/%s successfully", rayJob.Namespace, rayJob.Name)
@@ -397,7 +397,33 @@ func constructRayCluster(_ Test, namespace *corev1.Namespace, localQueueName str
 	}
 }
 
-func constructRayJob(_ Test, namespace *corev1.Namespace, rayCluster *rayv1.RayCluster, accelerator string, numberOfGpus int, rayImage string) *rayv1.RayJob {
+func constructRayJob(_ Test, namespace *corev1.Namespace, rayCluster *rayv1.RayCluster, accelerator string, numberOfGpus int, gpuResourceName string, rayImage string) *rayv1.RayJob {
+	fmt.Printf("Inside Ray Job function .........")
+	// Define the common runtime environment YAML
+	runtimeEnvYAML := `
+  pip:
+    - pytorch_lightning==2.4.0
+    - torchmetrics==1.6.0
+    - torchvision==0.19.1
+  env_vars:
+    MNIST_DATASET_URL: "` + GetMnistDatasetURL() + `"
+    PIP_INDEX_URL: "` + GetPipIndexURL() + `"
+    PIP_TRUSTED_HOST: "` + GetPipTrustedHost() + `"
+    ACCELERATOR: "` + accelerator + `"
+`
+
+	// Modify the runtime environment for  AMD GPUs
+	if gpuResourceName == "amd.com/gpu" {
+		runtimeEnvYAML += `
+  pip:
+    - --extra-index-url https://download.pytorch.org/whl/rocm6.1
+    - torch==2.4.1+rocm6.1
+`
+	}
+
+	fmt.Println("Yaml after append :")
+	fmt.Println(runtimeEnvYAML)
+	fmt.Printf("Before return .........")
 	return &rayv1.RayJob{
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: rayv1.GroupVersion.String(),
@@ -408,20 +434,8 @@ func constructRayJob(_ Test, namespace *corev1.Namespace, rayCluster *rayv1.RayC
 			Namespace: namespace.Name,
 		},
 		Spec: rayv1.RayJobSpec{
-			Entrypoint: "python /home/ray/jobs/mnist.py",
-			RuntimeEnvYAML: `
-  pip:
-    --extra-index-url https://download.pytorch.org/whl/rocm6.1
-	- torch==2.4.0+rocm6.1
-    - pytorch_lightning==2.4.0
-    - torchmetrics==1.6.0
-    - torchvision==0.20.1
-  env_vars:
-    MNIST_DATASET_URL: "` + GetMnistDatasetURL() + `"
-    PIP_INDEX_URL: "` + GetPipIndexURL() + `"
-    PIP_TRUSTED_HOST: "` + GetPipTrustedHost() + `"
-    ACCELERATOR: "` + accelerator + `"
-`,
+			Entrypoint:     "python /home/ray/jobs/mnist.py",
+			RuntimeEnvYAML: runtimeEnvYAML,
 			ClusterSelector: map[string]string{
 				RayJobDefaultClusterSelectorKey: rayCluster.Name,
 			},
